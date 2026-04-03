@@ -144,6 +144,15 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve((reader.result || "").toString());
+    reader.onerror = () => reject(new Error("模板图读取失败，请重新选择文件。"));
+    reader.readAsDataURL(file);
+  });
+}
+
 function getFieldNodes(name) {
   return form.querySelectorAll(`[name="${name}"]`);
 }
@@ -340,44 +349,6 @@ function renderEditableCards(editableDeck, title = "可编辑结果") {
   return true;
 }
 
-function readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve((reader.result || "").toString());
-    reader.onerror = () => reject(new Error("模板图读取失败，请重新选择文件。"));
-    reader.readAsDataURL(file);
-  });
-}
-
-function appendEditableOverrides(formData) {
-  EDITABLE_FIELD_NAMES.forEach((name) => {
-    const nodes = form.querySelectorAll(`[name="${name}"]`);
-    if (!nodes.length) return;
-
-    const first = nodes[0];
-    if (first.type === "radio") {
-      const checked = form.querySelector(`[name="${name}"]:checked`);
-      if (checked && checked.value) {
-        formData.set(name, checked.value);
-      }
-      return;
-    }
-
-    if (first.type === "checkbox") {
-      const checked = Array.from(nodes).some((node) => node.checked);
-      if (checked) {
-        formData.set(name, "true");
-      }
-      return;
-    }
-
-    const value = (first.value || "").trim();
-    if (value) {
-      formData.set(name, value);
-    }
-  });
-}
-
 function renderResult(payload) {
   if (!payload) return;
   if (payload.session_id) {
@@ -397,8 +368,6 @@ function renderResult(payload) {
   } else {
     pptxLink.classList.add("hidden");
   }
-}
-
 
   const editableDeck = payload.editable_deck && payload.editable_deck.pptx_url ? payload.editable_deck : null;
   if (editableDeck && editableDeck.pptx_url) {
@@ -537,45 +506,13 @@ async function handlePrepare() {
   formData.set("information_density", form.querySelector('[name="information_density"]').value || "medium");
 
   const styleDesc = String(form.querySelector('[name="style_description"]').value || "").trim();
-  if (styleDesc) {
-    formData.set("style_description", styleDesc);
-  } else {
-    formData.delete("style_description");
-  }
+  if (styleDesc) formData.set("style_description", styleDesc);
 
   const styleFile = form.querySelector('[name="style_template"]').files[0];
-  const hasStyleFile = styleFile && styleFile.size > 0;
-
-  if (styleDesc && hasStyleFile) {
-    throw new Error("风格描述与风格模板图互斥，请二选一。");
-  }
-
-  if (hasStyleFile) {
+  if (styleFile && styleFile.size > 0) {
     const styleTemplateBase64 = await readFileAsDataUrl(styleFile);
     formData.set("style_template_base64", styleTemplateBase64);
-    formData.delete("style_template");
-  } else {
-    formData.delete("style_template_base64");
-    formData.delete("style_template");
   }
-
-  const optionalKeys = [
-    "base_url",
-    "image_api_url",
-    "text_api_key",
-    "image_api_key",
-    "text_model",
-    "image_model",
-    "style_description",
-    "style_template_base64",
-    ...EDITABLE_FIELD_NAMES,
-  ];
-  optionalKeys.forEach((key) => {
-    const value = formData.get(key);
-    if (typeof value === "string" && !value.trim()) {
-      formData.delete(key);
-    }
-  });
 
   const sourceFiles = Array.from(form.querySelector('[name="source_files"]').files || []);
   sourceFiles.forEach((file) => formData.append("source_files", file));
@@ -689,12 +626,6 @@ function escapeHtml(value) {
 document.querySelectorAll('input[name="workflow_mode"]').forEach((node) => {
   node.addEventListener("change", () => setMode(node.value));
 });
-
-if (styleTemplateInput && styleTemplateBase64Input) {
-  styleTemplateInput.addEventListener("change", () => {
-    styleTemplateBase64Input.value = "";
-  });
-}
 prepareBtn.addEventListener("click", handlePrepare);
 replicaBtn.addEventListener("click", handleReplica);
 saveEditsBtn.addEventListener("click", () => saveSessionEdits(false));
@@ -702,6 +633,12 @@ renderBtn.addEventListener("click", handleRenderAll);
 rerenderBtn.addEventListener("click", handleRerenderSelected);
 editableBtn.addEventListener("click", () => handleEditable(true));
 editableSelectedBtn.addEventListener("click", () => handleEditable(false));
+
+if (styleTemplateInput && styleTemplateBase64Input) {
+  styleTemplateInput.addEventListener("change", () => {
+    styleTemplateBase64Input.value = "";
+  });
+}
 
 setMode("generate");
 loadDefaults();

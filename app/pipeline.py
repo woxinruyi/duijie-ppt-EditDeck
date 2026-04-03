@@ -3,7 +3,6 @@ import concurrent.futures
 import binascii
 import hashlib
 import json
-import mimetypes
 import os
 import re
 import traceback
@@ -261,7 +260,6 @@ class PPTImagePipeline:
         style_description: Optional[str],
         style_template_bytes: Optional[bytes],
         style_template_mime: Optional[str],
-        style_template_url: Optional[str],
         runtime_cfg: RuntimeConfig,
         export_mode: str = "both",
         information_density: str = DEFAULT_INFORMATION_DENSITY,
@@ -269,13 +267,12 @@ class PPTImagePipeline:
     ) -> GenerateResponse:
         requirement = (user_requirement or "").strip()
         style_desc = (style_description or "").strip()
-        style_template_url = (style_template_url or "").strip() or None
         normalized_export_mode = (export_mode or "both").strip().lower()
         normalized_information_density = self._normalize_information_density(information_density)
 
         if not requirement:
             raise ValueError("user_requirement cannot be empty.")
-        if style_desc and (style_template_bytes or style_template_url):
+        if style_desc and style_template_bytes:
             raise ValueError("风格描述与风格模板图互斥，请二选一。")
         if normalized_export_mode not in {"images", "ppt", "both"}:
             raise ValueError("export_mode must be one of: images, ppt, both.")
@@ -290,7 +287,6 @@ class PPTImagePipeline:
             "description_present": bool(style_desc),
             "template_present": bool(style_template_bytes),
             "template_mime": style_template_mime or "",
-            **self._style_reference_log_meta(style_template_url),
         }
         if style_desc:
             style_input_meta["type"] = "description"
@@ -381,13 +377,9 @@ class PPTImagePipeline:
                 logger=logger,
             )
             emit("style", "Style prompt generated", 35, total_slides=resolved_slide_count)
-            style_reference_data_url = style_template_url or self._image_bytes_to_data_url(style_template_bytes, style_template_mime)
+            style_reference_data_url = self._image_bytes_to_data_url(style_template_bytes, style_template_mime)
             style_reference_sha256 = hashlib.sha256(style_template_bytes).hexdigest() if style_template_bytes else ""
-            style_reference_mime = None
-            if style_reference_data_url:
-                style_reference_mime = (style_template_mime or "").strip() or self._guess_style_reference_mime(
-                    style_reference_data_url
-                )
+            style_reference_mime = (style_template_mime or "image/png") if style_reference_data_url else None
 
             emit("outline", "Generating outline...", 38, total_slides=resolved_slide_count)
             outline = self._generate_outline(
@@ -490,7 +482,6 @@ class PPTImagePipeline:
                             style_prompt,
                             information_density=normalized_information_density,
                         ),
-                        style_reference_data_url,
                         logger,
                     ): slide.page
                     for slide in outline.slides
@@ -567,7 +558,6 @@ class PPTImagePipeline:
         run_dir: Path,
         slide: SlideOutline,
         prompt: str,
-        style_reference_url: Optional[str] = None,
         logger: Optional[GenerationLogger] = None,
     ) -> SlideResult:
         file_name = f"slide_{slide.page:02d}.png"
@@ -577,7 +567,6 @@ class PPTImagePipeline:
             prompt,
             output_path,
             slide_page=slide.page,
-            style_reference_url=style_reference_url,
             logger=logger,
         )
         result = SlideResult(
@@ -1343,6 +1332,28 @@ When conflict occurs, preserve readability, hierarchy, and business clarity firs
             formatted.append(f"- {cleaned}")
         return "\n".join(formatted).strip()
 
+    def _finalize_style_prompt(self, raw_text: str, fallback_text: str) -> str:
+        cleaned = self._sanitize_style_prompt(raw_text)
+        if not cleaned:
+            cleaned = self._sanitize_style_prompt(fallback_text)
+        if not cleaned:
+            cleaned = STYLE_PROMPT_GUARD
+        return cleaned
+
+    def _sanitize_style_prompt(self, raw_text: str) -> str:
+        lines: list[str] = []
+        for line in re.split(r"\r?\n+", raw_text or ""):
+            original = line.strip()
+            normalized = re.sub(r"\s+", " ", original).strip()
+            if not normalized:
+                continue
+            if ASSISTANT_META_LINE_RE.search(normalized):
+                break
+            if STYLE_PROMPT_PARAMETER_RE.search(normalized) and not STYLE_PROMPT_PROHIBITION_RE.search(normalized):
+                continue
+            lines.append(original)
+        return "\n".join(lines).strip()
+
     @staticmethod
     def _collect_style_guidance_lines(style_prompt: str, keywords: tuple[str, ...], limit: int) -> list[str]:
         lines: list[str] = []
@@ -1355,14 +1366,6 @@ When conflict occurs, preserve readability, hierarchy, and business clarity firs
             if len(lines) >= limit:
                 break
         return lines
-
-    def _finalize_style_prompt(self, raw_text: str, fallback_text: str) -> str:
-        cleaned = self._sanitize_style_prompt(raw_text)
-        if not cleaned:
-            cleaned = self._sanitize_style_prompt(fallback_text)
-        if not cleaned:
-            cleaned = STYLE_PROMPT_GUARD
-        return cleaned
 
     def _build_style_consistency_guidance(self, style_prompt: str, *, has_reference: bool) -> str:
         keywords = ("一致", "统一", "延续", "重复", "稳定", "共享", "家族", "系统", "同一")
@@ -1391,30 +1394,6 @@ When conflict occurs, preserve readability, hierarchy, and business clarity firs
             "允许页面内容结构变化，但母版级视觉元素不能频繁换样式、换材质或换配色角色。",
         ]
         return self._format_guidance_lines(extracted + defaults, limit=6)
-
-    @staticmethod
-    def _guess_style_reference_mime(reference_url: str) -> str:
-        raw = (reference_url or "").strip()
-        if raw.lower().startswith("data:"):
-            match = re.match(r"^data:([^;]+);base64,", raw, re.IGNORECASE)
-            if match:
-                return match.group(1).strip().lower()
-        guessed_type, _ = mimetypes.guess_type(raw)
-        return guessed_type or "image/png"
-
-    def _sanitize_style_prompt(self, raw_text: str) -> str:
-        lines: list[str] = []
-        for line in re.split(r"\r?\n+", raw_text or ""):
-            original = line.strip()
-            normalized = re.sub(r"\s+", " ", original).strip()
-            if not normalized:
-                continue
-            if ASSISTANT_META_LINE_RE.search(normalized):
-                break
-            if STYLE_PROMPT_PARAMETER_RE.search(normalized) and not STYLE_PROMPT_PROHIBITION_RE.search(normalized):
-                continue
-            lines.append(original)
-        return "\n".join(lines).strip()
 
     def _generate_slide_render_prompt(
         self,
@@ -1651,12 +1630,10 @@ Key points:
         prompt: str,
         output_path: Path,
         slide_page: Optional[int] = None,
-        style_reference_url: Optional[str] = None,
         logger: Optional[GenerationLogger] = None,
     ) -> None:
         image_provider = (runtime_cfg.image_provider or "http").strip().lower()
         augmented_prompt = self._augment_prompt(prompt)
-        style_reference_url = (style_reference_url or "").strip() or None
         slide_dir = f"slides/slide_{slide_page:02d}" if slide_page else ""
         if logger and slide_page is not None:
             image_prompt_path = logger.write_text(f"{slide_dir}/image_prompt.txt", augmented_prompt)
@@ -1671,7 +1648,6 @@ Key points:
                     "timeout_seconds": self.settings.image_timeout,
                     "retries": self.settings.image_retries,
                     "image_prompt_path": image_prompt_path,
-                    **self._style_reference_log_meta(style_reference_url),
                 },
             )
             logger.set_slide(
@@ -1690,7 +1666,6 @@ Key points:
                 prompt=augmented_prompt,
                 output_path=output_path,
                 slide_page=slide_page,
-                style_reference_url=style_reference_url,
                 logger=logger,
             )
             return
@@ -1758,7 +1733,6 @@ Key points:
         prompt: str,
         output_path: Path,
         slide_page: Optional[int],
-        style_reference_url: Optional[str],
         logger: Optional[GenerationLogger],
     ) -> None:
         headers = {
@@ -1774,8 +1748,6 @@ Key points:
             "variants": self.settings.image_variants,
             "shutProgress": True,
         }
-        if style_reference_url:
-            payload["urls"] = [style_reference_url]
 
         attempts = 1 + max(0, self.settings.image_retries)
         last_error: Optional[Exception] = None
@@ -2109,23 +2081,6 @@ Key points:
             return None
         normalized_mime = (mime or "image/png").strip() or "image/png"
         return f"data:{normalized_mime};base64,{base64.b64encode(image_bytes).decode('utf-8')}"
-
-    @staticmethod
-    def _is_data_url(url: Optional[str]) -> bool:
-        return bool((url or "").strip().lower().startswith("data:"))
-
-    @classmethod
-    def _style_reference_log_meta(cls, url: Optional[str]) -> dict[str, Any]:
-        normalized = (url or "").strip()
-        if not normalized:
-            return {"style_reference_url": ""}
-        if cls._is_data_url(normalized):
-            return {
-                "style_reference_url": "",
-                "style_reference_data_url_prefix": normalized[:64],
-                "style_reference_data_url_length": len(normalized),
-            }
-        return {"style_reference_url": normalized}
 
     @staticmethod
     def _extract_urls(resp_json: dict[str, Any]) -> list[str]:

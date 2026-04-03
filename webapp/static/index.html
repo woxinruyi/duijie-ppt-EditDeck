@@ -60,7 +60,11 @@
               <label>
                 风格参考图（可选）
                 <input name="style_template" type="file" accept="image/*" />
+                <span class="field-hint">
+                  直接上传本地图片即可。提交时会自动转成 base64，再由后端还原为参考图参与风格分析。
+                </span>
               </label>
+              <input name="style_template_base64" type="hidden" />
             </div>
             <label>
               参考资料（可选，多文件）
@@ -91,11 +95,6 @@
 
           <div class="row">
             <label>
-              风格模板图
-              <input name="style_template" type="file" accept="image/*" />
-              <span class="field-hint">
-                直接上传本地图片即可。提交时会自动转成 base64，并把同一张图传给模型作为风格参考。
-              </span>
               输出模式（需求生成）
               <select name="export_mode_generate">
                 <option value="both" selected>图片 + PPT</option>
@@ -103,7 +102,6 @@
                 <option value="ppt">仅PPT</option>
               </select>
             </label>
-            <input name="style_template_base64" type="hidden" />
             <label>
               默认生成后自动转可编辑（图片复刻模式）
               <select name="replica_generate_editable">
